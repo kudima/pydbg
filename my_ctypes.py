@@ -4,7 +4,7 @@
 # PyDBG
 # Copyright (C) 2006 Pedram Amini <pedram.amini@gmail.com>
 #
-# $Id: my_ctypes.py 236 2010-03-05 18:16:17Z pedram.amini $
+# $Id: my_ctypes.py 194 2007-04-05 15:31:53Z cameron $
 #
 # This program is free software; you can redistribute it and/or modify it under the terms of the GNU General Public
 # License as published by the Free Software Foundation; either version 2 of the License, or (at your option) any later

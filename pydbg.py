@@ -4,7 +4,7 @@
 # PyDBG
 # Copyright (C) 2006 Pedram Amini <pedram.amini@gmail.com>
 #
-# $Id: pydbg.py 253 2011-01-24 19:13:57Z my.name.is.sober $
+# $Id: pydbg.py 231 2008-07-21 22:43:36Z pedram.amini $
 #
 # This program is free software; you can redistribute it and/or modify it under the terms of the GNU General Public
 # License as published by the Free Software Foundation; either version 2 of the License, or (at your option) any later
@@ -24,13 +24,13 @@
 @organization: www.openrce.org
 '''
 
-import os.path
 import sys
 import copy
 import signal
 import struct
-import pydasm
+#import pydasm
 import socket
+from threading import Thread
 
 from my_ctypes  import *
 from defines    import *
@@ -42,8 +42,9 @@ try:
     advapi32 = windll.advapi32
     ntdll    = windll.ntdll
     iphlpapi = windll.iphlpapi
+    psapi    = windll.psapi
 except:
-    kernel32 = CDLL(os.path.join(os.path.dirname(__file__), "libmacdll.dylib"))
+    kernel32 = CDLL("libmacdll.dylib")
     advapi32 = kernel32
 
 from breakpoint              import *
@@ -96,12 +97,14 @@ class pydbg:
 
         # private variables, internal use only:
         self._restore_breakpoint      = None      # breakpoint to restore
+        self._restore_breakpoint_tid  = dict()    # breakpoint to restore, per thread
         self._guarded_pages           = set()     # specific pages we set PAGE_GUARD on
         self._guards_active           = True      # flag specifying whether or not guard pages are active
 
         self.page_size                = 0         # memory page size (dynamically resolved at run-time)
         self.pid                      = 0         # debuggee's process id
         self.h_process                = None      # debuggee's process handle
+        self.tid                      = None      # id of the current debuggee thread
         self.h_thread                 = None      # handle to current debuggee thread
         self.debugger_active          = True      # flag controlling the main debugger event handling loop
         self.follow_forks             = ff        # flag controlling whether or not pydbg attaches to forked processes
@@ -120,8 +123,10 @@ class pydbg:
         self.write_violation          = None      # from dbg.u.Exception.ExceptionRecord.ExceptionInformation[0]
         self.violation_address        = None      # from dbg.u.Exception.ExceptionRecord.ExceptionInformation[1]
         self.exception_code           = None      # from dbg.u.Exception.ExceptionRecord.ExceptionCode
+        self.event_loop_thread        = None
 
         self.breakpoints              = {}        # internal breakpoint dictionary, keyed by address
+        self.bp_shadow                = {}        # a list of breakpoint we set during the session
         self.memory_breakpoints       = {}        # internal memory breakpoint dictionary, keyed by base address
         self.hardware_breakpoints     = {}        # internal hardware breakpoint array, indexed by slot (0-3 inclusive)
         self.memory_snapshot_blocks   = []        # list of memory blocks at time of memory snapshot
@@ -142,7 +147,8 @@ class pydbg:
         self.op3                      = None      # pydasm decoded 3rd operand, propagated by self.disasm()
 
         # control debug/error logging.
-        self._log = lambda msg: None #sys.stderr.write("PDBG_LOG> " + msg + "\n")
+        #self._log = lambda msg: sys.stderr.write("PBDG> " + msg + "\n")
+        self._log = lambda msg: None
         self._err = lambda msg: sys.stderr.write("PDBG_ERR> " + msg + "\n")
 
         # determine the system page size.
@@ -233,6 +239,7 @@ class pydbg:
 
         # enumerate the TEBs and add them to the internal dictionary.
         for thread_id in self.enumerate_threads():
+
             thread_handle  = self.open_thread(thread_id)
             thread_context = self.get_thread_context(thread_handle)
             selector_entry = LDT_ENTRY()
@@ -253,8 +260,58 @@ class pydbg:
                 self.peb = self.read_process_memory(teb + 0x30, 4)
                 self.peb = struct.unpack("<L", self.peb)[0]
 
+
         return self.ret_self()
 
+    
+    ####################################################################################################################
+    def attach_by_name(self, name):
+        '''
+        Attached to the process using the name supplied. Win32 only!
+
+        @type name: str
+        @param name: process executable name
+
+        @rtype:  pydbg
+        @return: Self
+        '''
+
+        processes_list_len = c_uint32(0)
+        processes_list = (c_uint32 * 0x200)()
+
+        if (psapi.EnumProcesses(byref(processes_list), 4*0x200,\
+            byref(processes_list_len)) == 0):
+            return None
+
+        inst = None
+
+        processes_list_len = processes_list_len.value
+        self._log("Enumerated %d processes" % processes_list_len)
+
+        while processes_list_len != 0:
+
+            pid = processes_list[processes_list_len-1]
+
+            if  pid == 0:
+                processes_list_len -= 1
+                continue
+
+            self._log("Querying process %d" % pid)
+
+            mod_name = (c_char * 0x100)()
+            h_proc = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION |\
+                                       PROCESS_VM_READ,
+                                       0, pid)
+
+            psapi.GetModuleBaseNameA(h_proc, c_void_p(0), byref(mod_name), 0x100)
+
+            if mod_name.value == name:
+                inst = self.attach(pid)
+                break
+
+            processes_list_len -= 1
+
+        return inst
 
     ####################################################################################################################
     def bp_del (self, address):
@@ -469,6 +526,21 @@ class pydbg:
 
 
     ####################################################################################################################
+    def bp_is_shadow(self, address):
+        '''
+        Determines if this address has ever been used to set a breakpoint
+        via bp_set.
+
+        @param address: the address we need to check
+        @type  address: DWORD
+
+        @rtype: Bool
+        @return: True if the address was ever used to set a breakpoint, False otherwise.
+        '''
+
+        return address in self.bp_shadow
+
+    ####################################################################################################################
     def bp_is_ours (self, address_to_check):
         '''
         Determine if a breakpoint address belongs to us.
@@ -563,7 +635,9 @@ class pydbg:
                 self.set_attr("dirty", True)
 
                 # add the breakpoint to the internal list.
-                self.breakpoints[address] = breakpoint(address, original_byte, description, restore, handler)
+                bp = breakpoint(address, original_byte, description, restore, handler)
+                self.breakpoints[address] = bp
+                self.bp_shadow[address] = bp
             except:
                 raise pdx("Failed setting breakpoint at %08x" % address)
 
@@ -851,6 +925,7 @@ class pydbg:
         # wait for a debug event.
         if kernel32.WaitForDebugEvent(byref(dbg), 100):
             # grab various information with regards to the current exception.
+            self.tid               = dbg.dwThreadId
             self.h_thread          = self.open_thread(dbg.dwThreadId)
             self.context           = self.get_thread_context(self.h_thread)
             self.dbg               = dbg
@@ -866,9 +941,11 @@ class pydbg:
                 continue_status = self.event_handler_create_thread()
 
             elif dbg.dwDebugEventCode == EXIT_PROCESS_DEBUG_EVENT:
+                self._log("Exit process")
                 continue_status = self.event_handler_exit_process()
 
             elif dbg.dwDebugEventCode == EXIT_THREAD_DEBUG_EVENT:
+                self._log("Exit thread")
                 continue_status = self.event_handler_exit_thread()
 
             elif dbg.dwDebugEventCode == LOAD_DLL_DEBUG_EVENT:
@@ -904,10 +981,17 @@ class pydbg:
             # from MSDN: Applications should call FlushInstructionCache if they generate or modify code in memory.
             #            The CPU cannot detect the change, and may execute the old code it cached.
             if self.dirty:
+                self._log("Flushing cache")
+                #self.suspend_thread(self.tid)
+                #self.resume_thread(self.tid)
+                # apparently this function does not quite work on multi core processors
                 kernel32.FlushInstructionCache(self.h_process, 0, 0)
+                self.set_attr("dirty", False)
 
             # close the opened thread handle and resume executing the thread that triggered the debug event.
             self.close_handle(self.h_thread)
+            self.tid = None
+            self.h_thread = None
             kernel32.ContinueDebugEvent(dbg.dwProcessId, dbg.dwThreadId, continue_status)
 
 
@@ -924,13 +1008,14 @@ class pydbg:
         debuggee quiting.
         '''
 
+        # don't let the user interrupt us in the midst of handling a debug event.
+        def_sigint_handler = None
+        try:
+            def_sigint_handler = signal.signal(signal.SIGINT, self.sigint_handler)
+        except:
+            pass
+
         while self.debugger_active:
-            # don't let the user interrupt us in the midst of handling a debug event.
-            try:
-                def_sigint_handler = None
-                def_sigint_handler = signal.signal(signal.SIGINT, self.sigint_handler)
-            except:
-                pass
 
             # if a user callback was specified, call it.
             if self.callbacks.has_key(USER_CALLBACK_DEBUG_EVENT):
@@ -941,13 +1026,13 @@ class pydbg:
             # iterate through a debug event.
             self.debug_event_iteration()
 
-            # resume keyboard interruptability.
-            if def_sigint_handler:
-                signal.signal(signal.SIGINT, def_sigint_handler)
+        # resume keyboard interruptability.
+        if def_sigint_handler:
+            signal.signal(signal.SIGINT, def_sigint_handler)
 
         # close the global process handle.
-        self.close_handle(self.h_process)
-
+        # $$$ don't close the handle cause we are not gonna be able to fix memory afterward
+        # self.close_handle(self.h_process)
 
     ####################################################################################################################
     def debug_set_process_kill_on_exit (self, kill_on_exit):
@@ -981,6 +1066,9 @@ class pydbg:
         self.bp_del_mem_all()
         self.bp_del_hw_all()
 
+
+        # close the global process handle.
+        self.close_handle(self.h_process)
         # try to detach from the target process if the API is available on the current platform.
         kernel32.DebugActiveProcessStop(self.pid)
 
@@ -1043,16 +1131,9 @@ class pydbg:
         @rtype:  List
         @return: List of tuples (address, disassembly) of instructions around the specified address.
         '''
-        
-        if num_inst == 0:
-            return [(address, self.disasm(address))]
-        
-        if num_inst < 0 or not int == type(num_inst):
-            self._err("disasm_around called with an invalid window size. reurning error value")
-            return [(address, "invalid window size supplied")]
-        
+
         # grab a safe window size of bytes.
-        window_size = (num_inst * 64) / 5
+        window_size = (num_inst / 5) * 64
 
         # grab a window of bytes before and after the requested address.
         try:
@@ -1376,6 +1457,7 @@ class pydbg:
 
         #  apply any existing hardware breakpoints to this new thread.
         for slot, hw_bp in self.hardware_breakpoints.items():
+            print "create thread hw bp"
             # mark available debug register as active (L0 - L3).
             thread_context.Dr7 |= 1 << (slot * 2)
 
@@ -1446,7 +1528,7 @@ class pydbg:
         with the following example code::
 
             last_dll = pydbg.get_system_dll(-1)
-            print "loading:%s from %s into:%08x size:%d" % (last_dll.name, last_dll.path, last_dll.base, last_dll.size)
+            print "loading:%s into:%08x size:%d" % (last_dll.name, last_dll.base, last_dll.size)
 
         The get_system_dll() routine is preferred over directly accessing the internal data structure for proper and
         transparent client/server support.
@@ -1546,6 +1628,19 @@ class pydbg:
                     self._log("first windows driven system breakpoint at %08x" % self.exception_address)
                     self.first_breakpoint = False
 
+            # check if this is one of the deleted breakpoint still in the CPU cache
+            elif self.bp_is_shadow(self.exception_address):
+
+                # restore the original again
+                self._log("restoring original byte at %08x using shadow" % self.exception_address)
+                self.write_process_memory(self.exception_address, self.bp_shadow[self.exception_address].original_byte)
+                self.set_attr("dirty", True)
+
+                self.set_register("EIP", self.exception_address)
+                self.context.Eip -= 1
+
+                continue_status = DBG_CONTINUE
+
             # ignore all other breakpoints we didn't explicitly set.
             else:
                 self._log("breakpoint not ours %08x" % self.exception_address)
@@ -1580,12 +1675,40 @@ class pydbg:
             # still active, that way we don't try and single step if the user requested a detach.
             if self.get_attr("debugger_active") and self.breakpoints.has_key(self.exception_address):
                 if self.breakpoints[self.exception_address].restore:
-                    self._restore_breakpoint = self.breakpoints[self.exception_address]
+                    self._set_restore_bp(self.breakpoints[self.exception_address])
                     self.single_step(True)
 
                 self.bp_del(self.exception_address)
 
         return continue_status
+
+    def _get_restore_bp(self):
+        '''
+        @rtype:  breakpoint
+        @return: an in instance of breakpoint corresponding to
+            the breakpoint we need to restore
+        '''
+
+        if self.tid in self._restore_breakpoint_tid:
+            return self._restore_breakpoint_tid[self.tid]
+        else:
+            return None
+
+    def _set_restore_bp(self, bp):
+        '''
+        @param bp: the breakpoint we need to restore 
+        @type bp: breakpoint
+        '''
+
+        if self.tid in self._restore_breakpoint_tid:
+            raise pdx("more then one breakpoint to restore")
+
+        self._restore_breakpoint_tid[self.tid] = bp
+
+    def _del_restore_bp(self):
+
+        if self.tid in self._restore_breakpoint_tid:
+            del(self._restore_breakpoint_tid[self.tid])
 
 
     ####################################################################################################################
@@ -1634,7 +1757,7 @@ class pydbg:
         # callback, then tell the single step handler about it. furthermore, check if the debugger is still active,
         # that way we don't try and single step if the user requested a detach.
         if self.get_attr("debugger_active") and mbi.BaseAddress in self._guarded_pages:
-            self._restore_breakpoint = memory_breakpoint(None, None, mbi, None)
+            self._set_restore_bp(memory_breakpoint(None, None, mbi, None))
             self.single_step(True)
 
         return continue_status
@@ -1653,8 +1776,9 @@ class pydbg:
         self._log("pydbg.exception_handler_single_step()")
 
         # if there is a breakpoint to restore.
-        if self._restore_breakpoint:
-            bp = self._restore_breakpoint
+        if self._get_restore_bp():
+
+            bp = self._get_restore_bp()
 
             # restore a soft breakpoint.
             if isinstance(bp, breakpoint):
@@ -1695,7 +1819,7 @@ class pydbg:
             continue_status = self.callbacks[EXCEPTION_SINGLE_STEP](self)
 
         # if we single stepped to handle a breakpoint restore.
-        elif self._restore_breakpoint:
+        elif self._get_restore_bp():
             continue_status = DBG_CONTINUE
 
             # macos compatability.
@@ -1712,21 +1836,25 @@ class pydbg:
         # check if the debugger is still active, that way we don't try and single step if the user requested a detach.
         if self.hardware_breakpoint_hit != None and self.get_attr("debugger_active"):
             slot = self.hardware_breakpoint_hit.slot
+            self._log("single_step: hw breakpoint in slot %d" % slot)
 
             if self.hardware_breakpoints.has_key(slot):
                 curr = self.hardware_breakpoints[slot]
                 prev = self.hardware_breakpoint_hit
 
                 if curr.address == prev.address:
-                    if prev.restore:
-                        self._restore_breakpoint = prev
-                        self.single_step(True)
 
                     self.bp_del_hw(slot=prev.slot)
 
+                    if prev.restore:
+                        self._set_restore_bp(prev)
+                        self.single_step(True)
+
+        else:
+            self._del_restore_bp()
+
         # reset the hardware breakpoint hit flag and restore breakpoint variable.
         self.hardware_breakpoint_hit = None
-        self._restore_breakpoint     = None
 
         return continue_status
 
@@ -2548,7 +2676,6 @@ class pydbg:
         '''
 
         self._guards_active = True
-
         for page in self._guarded_pages:
             # make a best effort, let's not crash on failure though.
             try:
@@ -2812,6 +2939,7 @@ class pydbg:
             pass
 
         while length:
+
             if not kernel32.ReadProcessMemory(self.h_process, address, read_buf, length, byref(count)):
                 if not len(data):
                     raise pdx("ReadProcessMemory(%08x, %d, read=%d)" % (address, length, count.value), True)
@@ -3007,6 +3135,7 @@ class pydbg:
         '''
 
         self._log("setting debug event loop flag to %s" % enable)
+
         self.debugger_active = enable
 
 
@@ -3642,3 +3771,83 @@ class pydbg:
             self.virtual_protect(_address, _length, old_protect)
         except:
             pass
+
+    def read_byte(self, addr):
+        '''
+        Read a byte stored as at a specified address as an unsigned 
+        integer.
+
+        @param addr: the address where the byte is located.
+        @type  addr: int
+
+        @return: a byte retrieved.
+        @rtype:  int
+        '''
+        return struct.unpack('<B', self.read(addr, 1))[0]
+
+    def read_word(self, addr):
+        '''
+        Read a word stored as a little endian at a specified address as
+        an unsigned integer.
+
+        @param addr: the address where the word is located.
+        @type  addr: int
+
+        @return: a word retrieved.
+        @rtype:  int
+        '''
+        return struct.unpack('<H', self.read(addr, 1))[0]
+
+    def read_dword(self, addr):
+        '''
+        Read a dword stored as a little endian at a specified address as
+        an unsigned integer.
+
+        @param addr: the address where the dword is located.
+        @type  addr: int
+
+        @return: a dword retrieved.
+        @rtype:  int
+        '''
+        return struct.unpack('<I', self.read(addr, 4))[0]
+
+
+    def inject_dll(self, path):
+        '''
+        Inject a dll into the debuggie process
+
+        @param name: path to the dll being injected
+        @type  name: str
+        '''
+
+        dll_name_ptr = self.virtual_alloc(0, len(path), MEM_COMMIT, PAGE_READWRITE)
+        self.write(dll_name_ptr, path)
+
+        h_ker32 = kernel32.GetModuleHandleA("kernel32.dll")
+
+        h_thread = kernel32.CreateRemoteThread(self.h_process, 0, 0,\
+            kernel32.GetProcAddress(h_ker32, "LoadLibraryA"),\
+            dll_name_ptr, 0, 0)
+
+        self._log("Remote thread created %08X" % h_thread) 
+
+
+    def read_le_dword(self, address):
+        return struct.unpack("<L", self.read(address, 4))[0]
+        
+    def get_heaps_address(self):
+
+        heaps_addr = []
+
+        peb = PEB(self)
+        addr = peb.ProcessHeaps
+        num_of_heaps = peb.NumberOfHeaps
+
+        for ndx in xrange(0, num_of_heaps):
+            l = self.read_le_dword(addr + ndx * 4)
+            if l:
+                heaps_addr.append(l)
+
+        return heaps_addr
+
+

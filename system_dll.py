@@ -2,7 +2,7 @@
 # PyDBG
 # Copyright (C) 2006 Pedram Amini <pedram.amini@gmail.com>
 #
-# $Id: system_dll.py 238 2010-04-05 20:40:46Z rgovostes $
+# $Id: system_dll.py 194 2007-04-05 15:31:53Z cameron $
 #
 # This program is free software; you can redistribute it and/or modify it under the terms of the GNU General Public
 # License as published by the Free Software Foundation; either version 2 of the License, or (at your option) any later
@@ -22,8 +22,6 @@
 @organization: www.openrce.org
 '''
 
-import os.path
-
 from my_ctypes import *
 from defines   import *
 from windows_h import *
@@ -33,7 +31,7 @@ try:
     kernel32 = windll.kernel32
     psapi    = windll.psapi
 except:
-    kernel32 = CDLL(os.path.join(os.path.dirname(__file__), "libmacdll.dylib"))
+    kernel32 = CDLL("libmacdll.dylib")
     psapi    = kernel32
 
 from pdx import *

@@ -35,6 +35,8 @@
 
 from my_ctypes import *
 from windows_h import *
+import struct
+
 
 ###
 ### manually declare entities from Tlhelp32.h since i was unable to import using h2xml.py.
@@ -127,6 +129,235 @@ class SYSDBG_MSR(Structure):
         ("Data",    c_ulonglong),
     ]
 
+class PEB:
+    def __init__(self, dbg):
+        """ 
+        Process Environment Block
+        
+        @type  imm: Debugger OBJECT
+        @param imm: Debugger        
+        """
+        # PEB struct is 488 bytes (win2k) located at 0x7ffdf000
+        # can also use NTQueryProcessInformation to locate PEB base
+        self.base = dbg.peb
+
+        try:
+            self.PEB = dbg.read(self.base, 488)
+        except:
+            error = "can't read PEB struct"
+            raise Exception, error
+
+        """
+        0:000> !kdex2x86.strct PEB
+        Loaded kdex2x86 extension DLL
+        struct   _PEB (sizeof=488)
+        +000 byte     InheritedAddressSpace
+        +001 byte     ReadImageFileExecOptions
+        +002 byte     BeingDebugged
+        +003 byte     SpareBool
+        +004 void     *Mutant
+        +008 void     *ImageBaseAddress
+        +00c struct   _PEB_LDR_DATA *Ldr
+        +010 struct   _RTL_USER_PROCESS_PARAMETERS *ProcessParameters
+        +014 void     *SubSystemData
+        +018 void     *ProcessHeap
+        +01c void     *FastPebLock
+        +020 void     *FastPebLockRoutine
+        +024 void     *FastPebUnlockRoutine
+        +028 uint32   EnvironmentUpdateCount
+        +02c void     *KernelCallbackTable
+        +030 uint32   SystemReserved[2]
+        +038 struct   _PEB_FREE_BLOCK *FreeList
+        +03c uint32   TlsExpansionCounter
+        +040 void     *TlsBitmap
+        +044 uint32   TlsBitmapBits[2]
+        +04c void     *ReadOnlySharedMemoryBase
+        +050 void     *ReadOnlySharedMemoryHeap
+        +054 void     **ReadOnlyStaticServerData
+        +058 void     *AnsiCodePageData
+        +05c void     *OemCodePageData
+        +060 void     *UnicodeCaseTableData
+        +064 uint32   NumberOfProcessors
+        +068 uint32   NtGlobalFlag
+        +070 union    _LARGE_INTEGER CriticalSectionTimeout
+        +070 uint32   LowPart
+        +074 int32    HighPart
+        +070 struct   __unnamed3 u
+        +070 uint32   LowPart
+        +074 int32    HighPart
+        +070 int64    QuadPart
+        +078 uint32   HeapSegmentReserve
+        +07c uint32   HeapSegmentCommit
+        +080 uint32   HeapDeCommitTotalFreeThreshold
+        +084 uint32   HeapDeCommitFreeBlockThreshold
+        +088 uint32   NumberOfHeaps
+        +08c uint32   MaximumNumberOfHeaps
+        +090 void     **ProcessHeaps
+        +094 void     *GdiSharedHandleTable
+        +098 void     *ProcessStarterHelper
+        +09c uint32   GdiDCAttributeList
+        +0a0 void     *LoaderLock
+        +0a4 uint32   OSMajorVersion
+        +0a8 uint32   OSMinorVersion
+        +0ac uint16   OSBuildNumber
+        +0ae uint16   OSCSDVersion
+        +0b0 uint32   OSPlatformId
+        +0b4 uint32   ImageSubsystem
+        +0b8 uint32   ImageSubsystemMajorVersion
+        +0bc uint32   ImageSubsystemMinorVersion
+        +0c0 uint32   ImageProcessAffinityMask
+        +0c4 uint32   GdiHandleBuffer[34]
+        +14c function *PostProcessInitRoutine
+        +150 void     *TlsExpansionBitmap
+        +154 uint32   TlsExpansionBitmapBits[32]
+        +1d4 uint32   SessionId
+        +1d8 void     *AppCompatInfo
+        +1dc struct   _UNICODE_STRING CSDVersion
+        +1dc uint16   Length
+        +1de uint16   MaximumLength
+        +1e0 uint16   *Buffer
+        """
+        # init PEB struct
+        index = 0x000
+        self.InheritedAddressSpace = struct.unpack("B",self.PEB[index])[0]
+        index = 0x001
+        self.ReadImageFileExecOptions = struct.unpack("B",self.PEB[index])[0]
+        index = 0x002
+        self.BeingDebugged = struct.unpack("B",self.PEB[index])[0]
+        index = 0x003
+        self.SpareBool = struct.unpack("B",self.PEB[index])[0]
+        index = 0x004
+        self.Mutant = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x008
+        self.ImageBaseAddress = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x00c
+        self.Ldr = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x010
+        self.ProcessParameters = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x014
+        self.SubSystemData = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x018
+        self.ProcessHeap = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x01c
+        self.FastPebLock = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x020
+        self.FastPebLockRoutine = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x024
+        self.FastPebUnlockRoutine = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x028
+        self.EnviromentUpdateCount = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x02c
+        self.KernelCallbackTable = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x030
+        self.SystemReserved = []
+        for i in range(0,2):
+            self.SystemReserved.append(struct.unpack("<L",self.PEB[index:index+4])[0])
+            index += 4
+        index = 0x038
+        self.FreeList = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x03c
+        self.TlsExpansionCounter = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x040
+        self.TlsBitmap = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x044
+        self.TlsBitmapBits = []
+        for i in range(0,2):
+            self.TlsBitmapBits.append(struct.unpack("<L",self.PEB[index:index+4])[0])
+            index += 4
+        index = 0x04c
+        self.ReadOnlySharedMemoryBase = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x050
+        self.ReadOnlySharedMemoryheap = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x054
+        self.ReadOnlyStaticServerData = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x058
+        self.AnsiCodePageData = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x05c
+        self.OemCodePageData = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x060
+        self.UnicodeCaseTableData = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x064
+        self.NumberOfProcessors = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x068
+        self.NtGlobalFlag = struct.unpack("<L",self.PEB[index:index+4])[0]
+
+        # ??? WHAT HAPPENS TO THE 4 bytes here ?
+
+        index = 0x070
+        self.CriticalSectionTimeout_LowPart = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x074
+        self.CriticalSectionTimeout_HighPart = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x078
+        self.HeapSegmentReserve = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x07c
+        self.HeapSegmentCommit = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x080
+        self.HeapDeCommitTotalFreeThreshold = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x084
+        self.HeapDeCommitFreeBlockThreshold = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x088
+        self.NumberOfHeaps = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x08c
+        self.MaximumNumberOfHeaps = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x090
+        self.ProcessHeaps = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x094
+        self.GdiSharedHandleTable = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x098
+        self.ProcessStarterHelper = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x09c
+        self.GdiDCAttributeList = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x0a0
+        self.LoaderLock = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x0a4
+        self.OSMajorVersion = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x0a8
+        self.OSMinorVersion = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x0ac
+        self.OSBuildNumber = struct.unpack("<H",self.PEB[index:index+2])[0]
+        index = 0x0ae
+        self.OSCSDVersion = struct.unpack("<H",self.PEB[index:index+2])[0]
+        index = 0x0b0
+        self.OSPlatformId = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x0b4
+        self.ImageSubsystem = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x0b8
+        self.ImageSubsystemMajorVersion = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x0bc
+        self.ImageSubsystemMinorVersion = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x0c0
+        self.ImageProcessAffinityMask = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x0c4
+        # uint32 GdiHandleBuffer[34]
+        self.GdiHandleBuffer = []
+        for i in range(0,34):
+            self.GdiHandleBuffer.append(struct.unpack("<L",self.PEB[index:index+4])[0])
+            index += 4
+        index = 0x14c
+        self.PostProcessInitRoutine = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x150
+        self.TlsExpansionBitmap = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x154
+        # uint32 TlsExpansionBitmapBits[32]
+        self.TlsExpansionBitmapBits = []
+        for i in range(0,32):
+            self.TlsExpansionBitmapBits.append(struct.unpack("<L",self.PEB[index:index+4])[0])
+            index += 4
+        index = 0x1d4
+        self.SessionId = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x1d8
+        self.AppCompatInfo = struct.unpack("<L",self.PEB[index:index+4])[0]
+        index = 0x1dc
+        # struct _UNICODE_STRING CSDVersion
+        self.CSDVersion_Length = struct.unpack("<H",self.PEB[index:index+2])[0]
+        index += 2
+        self.CSDVersion_MaximumLength = struct.unpack("<H",self.PEB[index:index+2])[0]
+        index += 2
+        self.CSDVersion_Buffer = struct.unpack("<H",self.PEB[index:index+2])[0]
+        index += 2
+
+
+
 ###
 ### manually declare various #define's as needed.
 ###
@@ -202,3 +433,9 @@ AF_INET                        = 0x00000002
 AF_INET6                       = 0x00000017
 MIB_TCP_STATE_LISTEN           = 0x00000002
 TCP_TABLE_OWNER_PID_ALL        = 0x00000005
+
+# process access right
+
+PROCESS_QUERY_INFORMATION      = 0x0400
+PROCESS_VM_READ                = 0x0010
+
